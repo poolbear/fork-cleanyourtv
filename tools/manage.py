@@ -53,7 +53,8 @@ On Windows, theme install and set use PowerShell (pwsh, or powershell when pwsh 
 profiles or changing execution policy. Add-ons with their own shell installer still need Bash; an install whose bash
 or Gradle wrapper cannot start says which and what to install, and exits 1 before anything is built or pushed. A theme install
 takes only its name; script arguments belong to add-ons. If set saves the local file but the push fails, it
-reports that separately: the TV may have received only part of the theme.
+reports that separately: exit 2 means nothing was sent to the TV, any other code means the TV may have
+received only part of the theme.
 
 Exit status: 0 the command ran, 1 a command on the TV or a script this checkout runs failed, 2 the command line
 asked for something this script does not do - a command it does not have, or a word the command would drop - which
@@ -62,6 +63,7 @@ the TV: no TV_HOST, a checkout with no tools/venv, and a TV tools/tv.py answered
 (a refused port, a Wireless debugging port that answers TLS, an address with no route to it). check.py answers the
 first two of those with 2 as well, and b64push.py the second.
 """
+import datetime
 import json
 import math
 import os
@@ -278,6 +280,7 @@ def number_in_range(key, item, parsed, text):
 # The Keys-table cell of a list the launcher reads with intArray() - `[83, 176]` for the remote buttons those
 # keys add. A list with anything else in it is answered with the built-in default, not the list.
 KEYCODES = "list of keycodes"
+JAVA_INT_MAX = 2147483647
 
 
 def keycode_problem(values):
@@ -297,6 +300,10 @@ def keycode_problem(values):
             return f"{entry} is not a whole number (the launcher reads it as {int(entry)})"
         if int(entry) < 1:
             return f"{int(entry)} is below 1"
+        if int(entry) > JAVA_INT_MAX:
+            # intValue() keeps the low 32 bits: 4294967297 becomes keycode 1, 4294967296 becomes 0.
+            wrapped = (int(entry) + 2**31) % 2**32 - 2**31
+            return f"{int(entry)} is above {JAVA_INT_MAX}, the largest the launcher reads; it would read {wrapped}"
     return None
 
 
@@ -346,6 +353,8 @@ def app_key_problem(entry):
         if not APP_KEY_NAME.fullmatch(code):
             return (f"{entry!r}: {code!r} is not a key the launcher reads, which is a keycode (190) or a "
                     f"KEYCODE_ name (KEYCODE_BUTTON_3)")
+        if code == "KEYCODE_UNKNOWN":
+            return f"{entry!r}: {label} 0 is not a button the launcher reads, which keeps only a key above 0"
     elif int(code) < 1:
         return f"{entry!r}: {label} 0 is not a button the launcher reads, which keeps only a key above 0"
     return app_key_target_problem(entry, target)
@@ -643,6 +652,22 @@ def colour_value(key, text):
     return value
 
 
+def festival_until_problem(value):
+    """Why Festival.parse() would turn the skin off for this end date, or None."""
+    # Java's trim() drops only characters up to U+0020, so a no-break space stays and fails the parse.
+    text = value.strip("".join(map(chr, range(33))))
+    if not text:
+        return None
+    # fromisoformat() alone also takes 20261130 and 2026-W48-1, which LocalDate.parse() rejects.
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text, re.ASCII):
+        return f"{value!r} is not a date written like 2026-11-30"
+    try:
+        datetime.date.fromisoformat(text)
+    except ValueError:
+        return f"{value!r} is not a day on the calendar"
+    return None
+
+
 def value_as(key, item, text):
     """The argument read the way the key's type needs, or a refusal naming what the key takes."""
     kind = declared_kind(item)
@@ -662,6 +687,17 @@ def value_as(key, item, text):
         else:
             # A string key is read as a String only, so `set greeting_name 42` means the text 42, not a number.
             value = enum_value(key, parsed if isinstance(parsed, str) else text)
+        if key == "festival_until":
+            problem = festival_until_problem(value)
+            if problem:
+                sys.exit(f"{key} takes YYYY-MM-DD or nothing, and {problem}. Festival.parse() turns the whole "
+                         f"festival skin off for a date it cannot read. Nothing was written or pushed.")
+        # Festival.parse(): Java trim() (characters up to U+0020), lowercase, then length() in UTF-16 units.
+        if key in ("festival", "seasonal_skin") and len(
+                value.strip("".join(map(chr, range(33)))).lower().encode("utf-16-le")) // 2 > 40:
+            sys.exit(f"{key} takes a name of at most 40 characters, and {value!r} is longer. Festival.parse() "
+                     f"returns no skin for a longer name, so the festival would be off. Nothing was written or "
+                     f"pushed.")
         if key == "source_panel_extra":
             problem = panel_extra_problem(value)
             if problem:
@@ -681,9 +717,9 @@ def value_as(key, item, text):
     if (item.get("type") or "").strip() == KEYCODES:
         problem = keycode_problem(parsed)
         if problem:
-            sys.exit(f"{key} takes {KEYCODES}, so every entry has to be a whole number of at least 1: {problem}, "
-                     f"and the launcher ignores the whole list when one entry is not, so those remote buttons "
-                     f"would do nothing. Nothing was written or pushed.")
+            sys.exit(f"{key} takes {KEYCODES}, so every entry has to be a whole number from 1 to {JAVA_INT_MAX}: "
+                     f"{problem}, and the launcher ignores the whole list when one entry is below 1, or maps another "
+                     f"button, so those remote buttons would not do what you set. Nothing was written or pushed.")
     if (item.get("type") or "").strip() == APP_KEYS:
         problem = app_keys_problem(parsed)
         if problem:
@@ -1099,7 +1135,10 @@ def cmd_set(key, value, theme_folder):
                          f"The temporary folder may remain at {staging}. Continuing with the theme push.\n")
     print(f"{key} = {json.dumps(parsed)} in {f}")
     code = push_theme(command)
-    if code:
+    if code == 2:
+        sys.stderr.write(f"Saved {f} locally, but the theme push failed (exit 2): nothing was sent to the TV. "
+                         "The local edit was kept.\n")
+    elif code:
         sys.stderr.write(f"Saved {f} locally, but the theme push failed (exit {code}). "
                          "The TV may be only partly updated; the local edit was kept.\n")
     return code

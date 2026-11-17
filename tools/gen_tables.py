@@ -85,7 +85,10 @@ def check_cell(where, key, value):
     if not isinstance(value, str) or not value.strip():
         return [f"{where}: \"{key}\" must be a non-empty string"]
     out = []
-    if value != value.strip() or "\n" in value:
+    # A CR is a line ending to a Markdown reader, and `read_text` reads the table back with universal
+    # newlines, so a written CR would come back as an LF and `--check` would never agree with the run
+    # that had just written it. Both line endings are refused; a CRLF already carries the LF.
+    if value != value.strip() or "\n" in value or "\r" in value:
         out.append(f"{where}: \"{key}\" must be one line with no space at either end")
     if re.search(r"(?<!\\)\|", value):
         out.append(f"{where}: \"{key}\" has a | that would split the table cell; write \\| instead")
@@ -487,7 +490,17 @@ def read_inputs(root, patch):
     not there both ended in a FileNotFoundError traceback before, which is exit 1 - the one answer that
     says the generated files are stale when in fact nothing was read at all.
     """
-    if not root.is_dir():
+    # `Path.is_dir()` re-raises every OSError except ENOENT and ENOTDIR, so a `--root` the
+    # filesystem refuses to stat - a name longer than NAME_MAX, or a path under a folder this user
+    # may not traverse - ended the run in that OSError as a traceback, exit 1: the answer this
+    # docstring keeps for tables that are out of date, over a run that read nothing. Both are the
+    # "cannot be read" case the exit paragraph names, and the sentence quotes the path either way.
+    try:
+        is_folder = root.is_dir()
+    except OSError as e:
+        return None, (f"--root '{root}': cannot be looked at ({e.strerror or e}). "
+                      f"Nothing was read or written.")
+    if not is_folder:
         return None, f"--root '{root}': not a folder. Nothing was read or written."
     # examples/ is what it reads; the three OWNED files are the parts of the checkout it writes.
     needs = ["examples"] + list(OWNED)

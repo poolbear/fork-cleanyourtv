@@ -93,7 +93,13 @@ def get(url, timeout=8):
         with urllib.request.urlopen(url, timeout=timeout, context=ctx) as r:
             return r.status, r.read().decode("utf-8", "replace"), None
     except urllib.error.HTTPError as e:
-        return e.code, "", None
+        # The error *is* the answer: urllib hands back the response - status line, headers and body -
+        # as the exception. Returning the code without closing it leaves the connection to the garbage
+        # collector, and Python 3.14's addbase then prints `ResourceWarning: Implicitly cleaning up
+        # <HTTPError 404: ...>` at exit, next to the report this tool printed (3.12 says nothing).
+        status = e.code
+        e.close()
+        return status, "", None
     except Exception as failure:
         return None, str(failure), failure
 
@@ -184,6 +190,17 @@ def address_problem(host):
 
 
 def main(argv):
+    # A console code page such as cp1252 cannot print every name; print a replacement character instead of
+    # stopping. The report is printed as the set's own API answers it, and `name` is what the owner called the
+    # TV in its settings: a Chinese or Japanese name ended the run in a UnicodeEncodeError traceback after the
+    # four requests had already been answered, and every line after it - the version, the ambilight features and
+    # the endpoints - was lost. The tools that talk to a TV over ADB inherit this from tools/tv.py, which sets
+    # the same two streams when it is imported; this one speaks HTTP and never loads it.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     args = argv[1:]
     # -h/--help is a reader asking what the tool does, not an address it cannot use: the other tools
     # in tools/ answer it at 0 with the note on stdout (adb-closed.py is the exception, pinned by
