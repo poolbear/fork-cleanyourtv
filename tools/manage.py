@@ -49,8 +49,10 @@ A --theme folder that is not there is refused by name, not made: set starts a co
 of your own that exists, and the push it ends with replaces the theme on the TV and empties that theme's
 wallpapers, so a mistyped path would leave a one-key theme behind.
 
-On Windows, theme install and set use PowerShell (pwsh, or powershell when pwsh is not on PATH), without loading
-profiles or changing execution policy. Add-ons with their own shell installer still need Bash; an install whose bash
+On Windows, theme install and set use PowerShell (pwsh, or powershell when pwsh is not on PATH) with
+-ExecutionPolicy Bypass - the flag every .ps1 command these pages hand out carries - so the script still loads
+under the Restricted policy Windows 10 and 11 ship; the flag applies to that one process and changes nothing on
+the machine. No profile is loaded. Add-ons with their own shell installer still need Bash; an install whose bash
 or Gradle wrapper cannot start says which and what to install, and exits 1 before anything is built or pushed. A theme install
 takes only its name; script arguments belong to add-ons. If set saves the local file but the push fails, it
 reports that separately: exit 2 means nothing was sent to the TV, any other code means the TV may have
@@ -64,11 +66,13 @@ the TV: no TV_HOST, a checkout with no tools/venv, and a TV tools/tv.py answered
 first two of those with 2 as well, and b64push.py the second.
 """
 import datetime
+import errno
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -779,6 +783,27 @@ def json_kind(value):
     return type(value).__name__
 
 
+def looked_at(path):
+    """What is at `path`: ('folder'|'file'|'missing', None), or ('refused', why) when the filesystem will not say.
+
+    `Path.exists()` answers False for a path that is not there and re-raises every other OSError, so a --theme
+    whose name no filesystem can hold (a component longer than NAME_MAX), or a folder this user may not
+    traverse, ended the run in an OSError traceback with exit 1 - the status this file keeps for "a command on
+    the TV or a script this checkout runs failed", over a run that never looked at a TV and wrote nothing.
+    Judged once, with the reason, the shape becomes the refusal it was meant to be.
+    """
+    try:
+        info = os.stat(path)
+    except OSError as error:
+        # What Path.exists() answers with False for: nothing is there, or nothing that is a folder.
+        if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EBADF):
+            return "missing", None
+        return "refused", (error.strerror or str(error))
+    except ValueError:      # a NUL in the name, which os.stat refuses before the filesystem sees it
+        return "missing", None
+    return ("folder" if stat.S_ISDIR(info.st_mode) else "file"), None
+
+
 def own_folder_problem(folder):
     """Why set may not write into `folder`, or None: it is one of the folders this checkout ships, a file, or
     not there at all."""
@@ -787,9 +812,14 @@ def own_folder_problem(folder):
         if folder == project or project in folder.parents:
             return (f"{folder} is inside this checkout's {name}/: set writes into a theme folder of your own, "
                     f"so copy one somewhere else first. Nothing was written or pushed.")
-    if folder.exists() and not folder.is_dir():
+    kind, why = looked_at(folder)
+    if kind == "refused":
+        return (f"{folder} cannot be looked at ({why}): --theme takes a theme folder of your own, and set writes "
+                f"into one that can be read. A name the filesystem refuses is usually a folder edited or pasted "
+                f"wrong. Nothing was written or pushed.")
+    if kind == "file":
         return f"{folder} is a file, not a folder: --theme takes a theme folder of your own."
-    if not folder.exists():
+    if kind == "missing":
         # A path with a file in the middle of it cannot be made at all, which is not a typo to point at the
         # folder for: name the file that is in the way, as the write used to.
         for parent in folder.parents:
@@ -922,7 +952,10 @@ def theme_command(folder):
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if not shell:
             sys.exit("PowerShell was not found: put pwsh or powershell on PATH. Nothing was written or pushed.")
-        return [shell, "-NoProfile", "-NonInteractive", "-File", str(TOOLS / "theme.ps1"), "-Theme", str(folder)]
+        # -ExecutionPolicy Bypass is the flag every .ps1 command these pages hand out carries: Windows 10 and 11
+        # ship Restricted, which refuses to load a script, and the flag covers that one process only (#3894).
+        return [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", str(TOOLS / "theme.ps1"), "-Theme", str(folder)]
     return ["bash", str(TOOLS / "theme.sh"), str(folder)]
 
 
